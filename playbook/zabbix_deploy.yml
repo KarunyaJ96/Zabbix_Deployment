@@ -1,0 +1,154 @@
+---
+- name: Deploy Zabbix Docker Infrastructure
+  hosts: localhost
+  become: true
+  gather_facts: true
+
+  vars:
+    zabbix_mysql_password: "zabbix_pwd"
+    zabbix_mysql_root_password: "root_pwd"
+    ansible_python_interpreter: "/usr/bin/python3"    
+
+  tasks:
+    - name: Create Docker Network for Zabbix
+      docker_container:
+        name: "zabbix-net"
+        image: "busybox"
+        command: "top"
+        network_mode: "bridge"
+        state: started
+
+    - name: Start MySQL Container
+      docker_container:
+        name: mysql-server
+        image: mysql:8.0-oracle
+        env:
+          MYSQL_ROOT_PASSWORD: "{{ zabbix_mysql_root_password }}"
+          MYSQL_USER: zabbix
+          MYSQL_PASSWORD: "{{ zabbix_mysql_password }}"
+          MYSQL_DATABASE: zabbix
+        networks:
+          - name: "zabbix-net"
+        restart_policy: unless-stopped
+        command: "--character-set-server=utf8 --collation-server=utf8_bin --default-authentication-plugin=mysql_native_password"
+        state: started
+
+    - name: Start Zabbix Java Gateway Container
+      docker_container:
+        name: zabbix-java-gateway
+        image: zabbix/zabbix-java-gateway:alpine-6.4-latest
+        networks:
+          - name: zabbix-net
+        restart_policy: unless-stopped
+        state: started
+
+    - name: Start Zabbix Server Container
+      docker_container:
+        name: zabbix-server-mysql
+        image: zabbix/zabbix-server-mysql:alpine-6.4-latest
+        env:
+          DB_SERVER_HOST: mysql-server
+          MYSQL_DATABASE: zabbix
+          MYSQL_USER: zabbix
+          MYSQL_PASSWORD: "{{ zabbix_mysql_password }}"
+          MYSQL_ROOT_PASSWORD: "{{ zabbix_mysql_root_password }}"
+          ZBX_JAVAGATEWAY: zabbix-java-gateway
+        networks:
+          - name: zabbix-net
+        ports:
+          - "10051:10051"
+        restart_policy: unless-stopped
+        state: started
+
+    - name: Start Zabbix Web Interface Container
+      docker_container:
+        name: zabbix-web-nginx-mysql
+        image: zabbix/zabbix-web-nginx-mysql:alpine-6.4-latest
+        env:
+          ZBX_SERVER_HOST: zabbix-server-mysql
+          DB_SERVER_HOST: mysql-server
+          MYSQL_DATABASE: zabbix
+          MYSQL_USER: zabbix
+          MYSQL_PASSWORD: "{{ zabbix_mysql_password }}"
+          MYSQL_ROOT_PASSWORD: "{{ zabbix_mysql_root_password }}"
+        networks:
+          - name: zabbix-net
+        ports:
+          - "80:8080"
+        restart_policy: unless-stopped
+        state: started
+
+- name: Onboard New Instances
+  hosts: localhost
+  tasks:
+        - name: Add new instances to the inventory
+          add_host:
+            name: "{{ item }}"
+            groups: new_instances
+            ansible_host: "{{ hostvars[item]['ansible_host'] }}"
+            ansible_user: "{{ hostvars[item]['ansible_user'] | default('ubuntu') }}"
+          with_items: "{{ groups['new_instances'] }}"
+
+        - name: Install Zabbix Agent on new instances
+          become: true
+          apt:
+            name: zabbix-agent
+            state: present
+          with_items: "{{ groups['new_instances'] }}"
+
+        - name: Configure Zabbix Agent
+          template:
+            src: /home/ubuntu/ZabbixDeployment/templates/zabbix_agentd.conf.j2
+            dest: "/etc/zabbix/zabbix_agentd.conf"
+            owner: root
+            group: root
+            mode: 0644
+          with_items: "{{ groups['new_instances'] }}"
+          notify:
+            - restart zabbix-agent
+          become: yes
+          become_user: root 
+
+  handlers:
+    - name: restart zabbix-agent
+      service:
+        name: zabbix-agent
+        state: restarted
+
+- name: Monitor CPU Utilization
+  hosts: zabbix_clients
+  gather_facts: true
+  tasks:
+        - name: Gather CPU facts
+          ansible.builtin.shell:
+             cmd: "top -bn 1 | grep 'Cpu(s)' | awk '{print 100 - $8}' | awk -F. '{print $1}'"
+          register: cpu_stats
+          ignore_errors: true  
+
+        - debug:
+            var: cpu_stats.stdout_lines | default([])
+
+        - debug:
+            var: cpu_stats.stderr_lines | default([])
+
+        - name: Trigger email if CPU exceeds 50%
+          zabbix_action:
+            server_url: http://localhost/zabbix
+            login_user: Admin
+            login_password: kjagadish
+            state: present
+            name: "High CPU Utilization Trigger"
+            event_source: "trigger"
+            status: enabled
+            esc_period: 60
+            conditions:
+              - type: "expression"
+                operator: ">"
+                value: "cpu_stats.stdout|int"
+            operations:
+              - type: send_message
+                subject: "High CPU Utilization Alert"
+                op_message: "The CPU utilization on {{ inventory_hostname }} is above 50%."
+                media_type: "Email"
+                send_to_users:
+                  - "Admin"

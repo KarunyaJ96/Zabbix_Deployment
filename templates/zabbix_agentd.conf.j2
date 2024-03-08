@@ -1,0 +1,27 @@
+# Zabbix Agent configuration file
+
+# Hostname of the monitored host 
+Hostname=new_instances
+
+# IP address of Zabbix Server
+Server=172.31.80.164
+
+# Unique hostname for this agent in Zabbix Server
+ServerActive=172.31.80.164
+
+# Log file path
+LogFile=/var/log/zabbix/zabbix_agentd.log
+
+# Log level (change as needed)
+LogFileSize=0
+DebugLevel=3
+
+# Allow Zabbix to run custom scripts
+UnsafeUserParameters=1
+
+ListenPort=10050
+
+# EnableRemoteCommands
+EnableRemoteCommands=1
+
+
